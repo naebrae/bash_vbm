@@ -1,0 +1,58 @@
+#!/bin/bash
+
+WAIT=300
+
+if [ "x$1" == "x" ]
+then
+  echo "Usage: $0 config_file"
+  exit 1
+else
+  CONFIG=$1
+fi
+
+if [ -f "$CONFIG" ]
+then
+  # Config should contain:
+  # VMNAME=
+  # ISOCFG=
+  # DVDISO=
+  # EXPORT=1
+  # REMOVE=1
+  # VMTYPE=
+  source ./"$CONFIG"
+else
+  echo >&2 "Config file $CONFIG was not found! Exiting.."
+  exit 1
+fi
+
+BASE=`dirname $0`
+if [ -x $BASE/vbm ]; then PATH=$PATH:$BASE; fi
+command -v vbm >/dev/null 2>&1 || { echo >&2 "I require vbm but it's not installed. Exiting."; exit 1; }
+
+if [ ! -f "$DVDISO" ]
+then
+  echo >&2 "Could not file $DVDISO! Exiting.."
+  exit 1
+fi
+
+if [ "x$VMTYPE" == "x" ]; then VMTYPE="RedHat_64"; fi
+
+if [ -f ${VMNAME}-ks.iso ]; then /bin/rm -f ${VMNAME}-ks.iso; fi
+if [ -f ${VMNAME}-virtualbox.box ]; then /bin/rm -f ${VMNAME}-virtualbox.box; fi
+if [ -f ${VMNAME}.ova ]; then /bin/rm -f ${VMNAME}.ova; fi
+if [ -f ${VMNAME}.ovf ]; then /bin/rm -f ${VMNAME}.ovf; fi
+if [ -f ${VMNAME}-disk001.vmdk ]; then /bin/rm -f ${VMNAME}-disk001.vmdk; fi
+
+vbm remove ${VMNAME}
+vbm -e create ${VMNAME} ${VMTYPE} ${DISKMB}
+RESULT=$?
+if [ $RESULT -eq 0 ]
+then
+  vbm -e mkiso ${VMNAME}-ks.iso ${ISOCFG}/
+  vbm build ${VMNAME} ${VMNAME}-ks.iso ${DVDISO}
+  echo "Waiting ${WAIT}s for the build .." && sleep ${WAIT}
+  if [ "x$EXPORT" != "x" ] && [ $EXPORT -eq 1 ]; then vbm export ${VMNAME}; else vbm package ${VMNAME}; fi
+fi
+if [ "x$REMOVE" != "x" ] && [ $REMOVE -eq 1 ]; then vbm remove ${VMNAME}; fi
+if [ -f ${VMNAME}-ks.iso ]; then /bin/rm -f ${VMNAME}-ks.iso; fi
+

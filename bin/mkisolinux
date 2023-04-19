@@ -1,0 +1,90 @@
+#!/bin/bash
+
+efi=0
+while getopts "e" opt; do
+  case "$opt" in
+    e) efi=1
+      ;;
+    esac
+done
+shift $((OPTIND-1))
+[ "${1:-}" = "--" ] && shift
+
+ISO=$1
+if [ "x$ISO" == "x" ]
+then
+  echo "Usage $0 iso isolinux/"
+  exit
+fi  
+
+if [ ! -f "$ISO" ]
+then
+  echo "$ISO missing"
+  exit
+fi
+
+ISOLINUX=$2
+if [ "x$ISOLINUX" == "x" ]
+then
+  echo "Usage $0 iso isolinux/"
+  exit
+fi  
+
+if [ ! "${ISOLINUX: -1}" == "/" ]
+then
+  ISOLINUX=$ISOLINUX"/"
+fi
+
+if [ ! -d "$ISOLINUX" ]
+then
+  echo "isolinux folder $ISOLINUX is missing!"
+  exit
+fi
+
+isoinfo -J -i ${ISO} -x /isolinux/initrd.img   > ${ISOLINUX}initrd.img
+isoinfo -J -i ${ISO} -x /isolinux/isolinux.bin > ${ISOLINUX}isolinux.bin
+isoinfo -J -i ${ISO} -x /isolinux/vmlinuz      > ${ISOLINUX}vmlinuz
+isoinfo -J -i ${ISO} -x /isolinux/ldlinux.c32  > ${ISOLINUX}ldlinux.c32
+[ -s ${ISOLINUX}ldlinux.c32 ] || rm -f ${ISOLINUX}ldlinux.c32
+
+LABEL=$(isoinfo -d -i ${ISO} | grep "Volume id" | cut -d':' -f 2 | xargs | sed 's/ /\\x20/g')
+
+if [ ! -f "$ISOLINUX"isolinux.cfg ]
+then
+  cat > ${ISOLINUX}isolinux.cfg <<EOT
+default kickstart
+prompt 0
+timeout 0
+label kickstart
+  kernel vmlinuz
+  append initrd=initrd.img inst.stage2=hd:LABEL=${LABEL} quiet inst.ks=cdrom:/ks.cfg
+EOT
+fi
+
+if [ $efi -eq 1 ]
+then
+  isoinfo -J -i ${ISO} -x /images/efiboot.img > ${ISOLINUX}efiboot.img
+
+  if [ ! -d "$ISOLINUX"EFI ]
+  then
+    mkdir -p "$ISOLINUX"EFI/BOOT
+  fi
+
+  isoinfo -J -i ${ISO} -x /EFI/BOOT/BOOTX64.EFI > ${ISOLINUX}EFI/BOOT/BOOTX64.EFI
+  [ -s ${ISOLINUX}EFI/BOOT/BOOTX64.EFI ] || rm -f ${ISOLINUX}EFI/BOOT/BOOTX64.EFI
+  isoinfo -J -i ${ISO} -x /EFI/BOOT/grubx64.efi > ${ISOLINUX}EFI/BOOT/grubx64.efi
+  [ -s ${ISOLINUX}EFI/BOOT/grubx64.efi ] || rm -f ${ISOLINUX}EFI/BOOT/grubx64.efi
+  
+  if [ ! -f "$ISOLINUX"EFI/BOOT/grub.cfg ]
+  then
+    cat > ${ISOLINUX}EFI/BOOT/grub.cfg <<EOT
+content_copy
+set default=0
+set timeout=0
+menuentry 'Kickstart' --class fedora --class gnu-linux --class gnu --class os {
+  linuxefi /vmlinuz inst.stage2=hd:LABEL=${LABEL} quiet inst.ks=cdrom:/ks.cfg
+  initrdefi /initrd.img
+}
+EOT
+  fi
+fi

@@ -1,0 +1,6 @@
+VMNAME=rhelsrv-7.9
+ISOCFG=rhelsrv7.9
+DVDISO=~/isos/rhel-server-7.9-x86_64-dvd.iso
+EXPORT=0
+REMOVE=1
+WAIT=1500

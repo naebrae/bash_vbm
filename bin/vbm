@@ -1,0 +1,428 @@
+#! /bin/bash
+#version 2.6
+
+VBM=`which VBoxManage`
+if [ "x$VBM" == "x" ]
+then
+  echo "VBoxManage could not be found in the path. Exiting..."
+  exit 1
+fi
+
+efi=0
+while getopts "e" opt; do
+  case "$opt" in
+    e) efi=1
+      ;;
+    esac
+done
+shift $((OPTIND-1))
+[ "${1:-}" = "--" ] && shift
+
+case "$1" in
+  mkiso)
+	echo "Make ISO .."
+
+	ISO=$2
+	if [ "x$ISO" == "x" ]
+	then
+		echo "Missing isofile"
+		echo "Usage $0 $1 isofile isolinuxpath"
+		exit 1
+	fi
+	ISOLINUX=$3
+	if [ "x$ISOLINUX" == "x" ]
+	then
+		echo "Missing isolinuxpath"
+		echo "Usage $0 $1 isofile isolinuxpath"
+		exit 1
+	fi
+	if [ ! -f ${ISOLINUX}isolinux.cfg ]
+	then
+		echo "${ISOLINUX} is missing isolinux.cfg"
+		exit 1
+	fi
+
+	if [ $efi -eq 1 ]
+	then
+		echo "Make EFI image"
+		genisoimage -J -joliet-long -r -v -T -b isolinux.bin -c boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -eltorito-alt-boot -e efiboot.img -no-emul-boot -V "CDROM" -o "$ISO" "$ISOLINUX"
+		isohybrid --uefi "$ISO"
+	else
+		echo "Make BIOS image"
+		genisoimage -J -joliet-long -r -v -T -b isolinux.bin -c boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -no-emul-boot -V "CDROM" -o "$ISO" "$ISOLINUX"
+	fi
+
+	;;
+        
+  create)
+	echo "Create .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname ostype"
+		exit 1
+	fi
+
+	OSTYPE=$3
+	if [ "x$OSTYPE" == "x" ]
+	then
+		echo "Usage $0 $1 vmname ostype"
+		VBoxManage list ostypes | grep "^ID:"
+		exit 1
+	fi
+
+	DISKSIZE=$4
+	if [ "x$DISKSIZE" == "x" ]
+	then
+		if [ "$OSTYPE" == "Windows2016_64" ] || [ "$OSTYPE" == "Windows2019_64" ]
+		then
+			MEMSIZE="4096"
+			DISKSIZE="20480"
+		else
+			if [ "$OSTYPE" == "Oracle_64" ]
+			then
+				MEMSIZE="1024"
+				DISKSIZE="20480"
+			else
+				MEMSIZE="1024"
+				DISKSIZE="20480"
+			fi
+		fi
+	else
+		MEMSIZE="1024"
+	fi
+
+	echo "Creating $OSTYPE virtual machine called $VMNAME with a disk size of $DISKSIZE"
+	VBoxManage createvm --name "$VMNAME" --ostype "$OSTYPE" --register
+	RESULT=$?
+	if [ $RESULT != 0 ]
+	then
+		echo "Create VM returned error $RESULT"
+		exit 1
+	fi
+
+	# https://www.virtualbox.org/manual/ch09.html#guitweaks
+	# VBoxManage setextradata "$VMNAME" GUI/PreventReconfiguration true
+	
+	VMCFG="`VBoxManage showvminfo "$VMNAME" --machinereadable | grep CfgFile= | sed 's/^CfgFile=//;s/"//g'`"
+	VMBASE=`dirname "$VMCFG"`
+
+	VBoxManage createhd --filename "$VMBASE/$VMNAME.vdi" --size $DISKSIZE
+	RESULT=$?
+	if [ $RESULT != 0 ]
+	then
+		echo "Create disk returned error $RESULT"
+		VBoxManage unregistervm "$VMNAME" --delete
+		exit 1
+	fi
+
+	if [ "$OSTYPE" == "Oracle_64" ] || [ "$OSTYPE" == "RedHat_64" ] 
+	then
+		VBoxManage storagectl "$VMNAME" --name "IDE" --add ide
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium emptydrive
+		VBoxManage storagectl "$VMNAME" --name "SATA" --add sata --controller IntelAHCI --portcount 16
+		VBoxManage storageattach "$VMNAME" --storagectl "SATA" --port 0 --device 0 --type hdd --medium "$VMBASE/$VMNAME.vdi"
+	elif [ "$OSTYPE" == "Windows2016_64" ] || [ "$OSTYPE" == "Windows2019_64" ]
+	then
+		VBoxManage storagectl "$VMNAME" --name "IDE" --add ide
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium emptydrive
+		VBoxManage storagectl "$VMNAME" --name "SATA" --add sata --controller IntelAHCI --portcount 16
+		VBoxManage storageattach "$VMNAME" --storagectl "SATA" --port 0 --device 0 --type hdd --medium "$VMBASE/$VMNAME.vdi"
+    else
+		VBoxManage storagectl "$VMNAME" --name "IDE" --add ide
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 0 --device 0 --type hdd --medium "$VMBASE/$VMNAME.vdi"
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium emptydrive
+	fi
+
+	if [ $efi -eq 1 ]
+	then
+		VBoxManage modifyvm "$VMNAME" --firmware efi
+    else
+		VBoxManage modifyvm "$VMNAME" --firmware bios
+	fi
+
+	VBoxManage modifyvm "$VMNAME" --rtcuseutc on
+	VBoxManage modifyvm "$VMNAME" --audio-enabled off
+	VBoxManage modifyvm "$VMNAME" --boot1 dvd --boot2 disk --boot3 none --boot4 none
+	VBoxManage modifyvm "$VMNAME" --memory $MEMSIZE --vram 64
+	VBoxManage modifyvm "$VMNAME" --nic1 nat
+
+	if [ "$OSTYPE" == "Windows2016_64" ] || [ "$OSTYPE" == "Windows2019_64" ]
+	then
+		VBoxManage modifyvm "$VMNAME" --usb on --usbxhci on  # USB 3.0
+		VBoxManage modifyvm "$VMNAME" --graphicscontroller vboxsvga
+		VBoxManage modifyvm "$VMNAME" --natpf1 tcp3389,tcp,,3389,,3389
+	else
+		VBoxManage modifyvm "$VMNAME" --usb on --usbehci on  # USB 2.0
+		VBoxManage modifyvm "$VMNAME" --graphicscontroller vmsvga
+		VBoxManage modifyvm "$VMNAME" --natpf1 tcp22,tcp,,2222,,22
+	fi
+
+	;;
+
+  build)
+	echo "Build .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname dvd [dvd]"
+		exit 1
+	fi
+
+	CDROM1=$3
+	if [ "x$CDROM1" == "x" ]
+	then
+		echo "Usage $0 $1 vmname dvd"
+		exit 1
+	else
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium "$CDROM1"
+	fi 
+
+	CDROM2=$4
+	if [ "x$CDROM2" != "x" ]
+	then
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 1 --type dvddrive --medium "$CDROM2"
+	fi
+
+	#VBoxManage startvm "$VMNAME" --type gui
+	VBoxManage startvm "$VMNAME" --type headless
+	RESULT=$?
+	if [ $RESULT != 0 ]
+	then
+		echo "Start VM returned error $RESULT"
+		exit 1
+	fi
+
+	;;
+
+  export)
+	echo "Exporting .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname"
+		exit 1
+	fi
+
+	VBoxManage controlvm "$VMNAME" acpipowerbutton
+	RESULT=$?
+	if [ $RESULT != 1 ]
+	then
+		# RESULT=1 when already down so machine is running, wait to poweroff before continuing.
+		echo "Waiting for $VMNAME to poweroff"
+		sleep 30
+	fi
+
+	VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium none
+	VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 1 --type dvddrive --medium none
+	# VBoxManage storagectl "$VMNAME" --name "IDE" --remove
+
+	if [ "$OSTYPE" == "Windows2016_64" ] || [ "$OSTYPE" == "Windows2019_64" ]
+	then
+		VBoxManage modifyvm "$VMNAME" --natpf1 delete tcp3389
+	else
+		VBoxManage modifyvm "$VMNAME" --natpf1 delete tcp22
+	fi
+
+	if [ -f "$VMNAME".ovf ]
+	then
+		rm -f "$VMNAME".ovf && rm -f "$VMNAME"*.vmdk && rm -f "$VMNAME".ova
+	fi
+	VBoxManage export "$VMNAME" --output "$VMNAME".ovf
+	sed -i "s/virtualbox-2.2/vmx-09/g" "$VMNAME".ovf
+	# vSphere doesn't like the PIIX4 ideController subType so removing it
+	sed -i "/<rasd:ResourceSubType>PIIX4<\/rasd:ResourceSubType>/d" "$VMNAME".ovf
+	tar -cf "$VMNAME".ova "$VMNAME".ovf "$VMNAME"*.vmdk
+
+	;;
+
+  package)
+	echo "Creating vagrant box .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname"
+		exit 1
+	fi
+
+	export "`vboxmanage showvminfo $VMNAME --machinereadable | grep ostype`"
+	echo $ostype
+	OSTYPE="`echo $ostype | grep -c Windows`"
+
+	VBoxManage controlvm "$VMNAME" acpipowerbutton
+	RESULT=$?
+	if [ $RESULT != 1 ]
+	then
+		# RESULT=1 when already down so machine is running, wait to poweroff before continuing.
+		echo "Waiting for $VMNAME to poweroff"
+		sleep 30
+	fi
+	VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium emptydrive
+	VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 1 --type dvddrive --medium none
+
+	if [ -f "$VMNAME"-virtualbox.box ]
+	then
+		rm -f "$VMNAME"-virtualbox.box
+	fi
+
+	# OSTYPE is the count of the word Windows in machine ostype.
+	if [ "$OSTYPE" -gt 0 ]
+	then
+		echo 'Vagrant.configure(2) do |config|' > "$VMNAME"-Vagrantfile
+		echo '  config.vm.communicator = "winrm"' >> "$VMNAME"-Vagrantfile
+		echo '  config.winrm.username = "vagrant"' >> "$VMNAME"-Vagrantfile
+		echo '  config.winrm.password = "vagrant"' >> "$VMNAME"-Vagrantfile
+		echo '  config.vm.guest = :windows' >> "$VMNAME"-Vagrantfile
+		echo '  config.vm.network :forwarded_port, guest: 3389, host: 3389, id: "rdp", auto_correct: true' >> "$VMNAME"-Vagrantfile
+		echo 'end' >> "$VMNAME"-Vagrantfile
+	else
+		echo 'Vagrant.configure(2) do |config|' > "$VMNAME"-Vagrantfile
+		echo '  config.vm.synced_folder ".", "/home/vagrant/sync", type: "rsync", disabled: true' >> "$VMNAME"-Vagrantfile
+		echo '  config.vm.synced_folder ".", "/vagrant", disabled: true' >> "$VMNAME"-Vagrantfile
+		echo 'end' >> "$VMNAME"-Vagrantfile
+	fi
+
+	vagrant package --base "$VMNAME" --output "$VMNAME"-virtualbox.box --vagrantfile "$VMNAME"-Vagrantfile
+
+	rm "$VMNAME"-Vagrantfile
+
+	;;
+
+  start)
+	echo "Start .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname [dvd1] [dvd2]"
+		exit 1
+	fi
+
+	CDROM1=$3
+	if [ "x$CDROM1" != "x" ]
+	then
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium "$CDROM1"
+	else
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium emptydrive
+	fi
+
+	CDROM2=$4
+	if [ "x$CDROM2" != "x" ]
+	then
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 1 --type dvddrive --medium "$CDROM2"
+	else
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 1 --type dvddrive --medium none
+	fi
+
+	VBoxManage startvm "$VMNAME" --type gui
+	#VBoxManage startvm "$VMNAME" --type headless
+	RESULT=$?
+	if [ $RESULT != 0 ]
+	then
+		echo "Start VM returned error $RESULT"
+		exit 1
+	fi
+	
+	;;
+
+  starthl)
+	echo "Start .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname [dvd1] [dvd2]"
+		exit 1
+	fi
+
+	CDROM1=$3
+	if [ "x$CDROM1" != "x" ]
+	then
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium "$CDROM1"
+	else
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 0 --type dvddrive --medium emptydrive
+	fi
+
+	CDROM2=$4
+	if [ "x$CDROM2" != "x" ]
+	then
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 1 --type dvddrive --medium "$CDROM2"
+	else
+		VBoxManage storageattach "$VMNAME" --storagectl "IDE" --port 1 --device 1 --type dvddrive --medium none
+	fi
+
+	VBoxManage startvm "$VMNAME" --type headless
+	RESULT=$?
+	if [ $RESULT != 0 ]
+	then
+		echo "Start VM returned error $RESULT"
+		exit 1
+	fi
+        
+	;;
+
+  stop)
+	echo "Stop .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname"
+		exit 1
+	fi
+	VBoxManage controlvm "$VMNAME" poweroff
+
+	;;
+
+  remove)
+	echo "Remove .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname"
+		exit 1
+	fi
+	VBoxManage controlvm "$VMNAME" poweroff
+	RESULT=$?
+	if [ $RESULT != 1 ]
+	then
+		# RESULT=1 when already down so machine is running, wait to poweroff before continuing.
+		echo "Waiting for $VMNAME to poweroff"
+		sleep 5
+	fi
+
+	VBoxManage unregistervm "$VMNAME" --delete
+
+	;;
+
+  info)
+	echo "Info .."
+
+	VMNAME=$2
+	if [ "x$VMNAME" == "x" ]
+	then
+		echo "Usage $0 $1 vmname"
+		exit 1
+	fi
+	VBoxManage showvminfo "$VMNAME"
+
+	;;
+
+  list)
+	echo "List .."
+	
+	VM=`VBoxManage list -l vms | grep -e "^State" -e "^Name" | grep -v "Host path"` 
+	echo $VM | sed "s/Name:/\nName:/g" | sed "s/State:/\tState:/g"
+        
+	;;
+
+  *)
+	echo "Usage: $0 [-e] {mkiso|create|build|package|start|starthl|stop|remove|info|list}"
+	echo "       -e  enable EFI"
+	exit 2
+esac

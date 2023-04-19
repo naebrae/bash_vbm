@@ -1,0 +1,6 @@
+VMNAME=rhelsrv-template-9.1
+ISOCFG=rhelsrv9.1
+DVDISO=~/isos/rhel-baseos-9.1-x86_64-dvd.iso
+EXPORT=1
+REMOVE=0
+WAIT=1200
